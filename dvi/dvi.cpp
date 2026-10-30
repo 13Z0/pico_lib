@@ -11,6 +11,7 @@
 #include <hardware/gpio.h>
 #include <hardware/pwm.h>
 #include <hardware/irq.h>
+#include <hardware/timer.h>
 #include <hardware/structs/padsbank0.h>
 #include <stdio.h>
 #include <assert.h>
@@ -170,7 +171,7 @@ namespace dvi
                     curTMDSBuffer_ = nullptr;
                 }
                 else if (validTMDSQueue_.size() &&
-                         validTMDSQueue_.peek().line * 2 == lineCounter_)
+                         validTMDSQueue_.peek().first == lineCounter_)
                 {
                     // Never handed to the DMA, so it can go straight back.
                     freeTMDSQueue_.enque(validTMDSQueue_.deque().buffer);
@@ -182,16 +183,21 @@ namespace dvi
                 {
                     if (validTMDSQueue_.size())
                     {
-                        int line = validTMDSQueue_.peek().line;
-                        if (line * 2 == lineCounter_)
+                        const auto next = validTMDSQueue_.peek();
+                        if (next.first == lineCounter_)
                         {
+                            curLast_ = next.first + next.count - 1;
                             curTMDSBuffer_ = validTMDSQueue_.deque().buffer;
                         }
                     }
                 }
                 tmdsBuf = curTMDSBuffer_ ? curTMDSBuffer_->data() : nullptr;
+                if (!tmdsBuf)
+                {
+                    ++missedLines_;
+                }
 
-                if (lineCounter_ % N_LINE_PER_DATA == N_LINE_PER_DATA - 1)
+                if (curTMDSBuffer_ && lineCounter_ == curLast_)
                 {
                     releaseTMDSBuffer_[0] = curTMDSBuffer_;
                     curTMDSBuffer_ = nullptr;
@@ -460,7 +466,7 @@ namespace dvi
         encodeTMDS_RGB555(dstTMDS->data(),
                           srcLine.buffer->data(), srcLine.buffer->size());
 
-        validTMDSQueue_.enque({srcLine.line, dstTMDS});
+        validTMDSQueue_.enque({srcLine.line * N_LINE_PER_DATA, N_LINE_PER_DATA, dstTMDS});
         freeLineQueue_.enque(std::move(srcLine.buffer));
     }
 
@@ -473,7 +479,7 @@ namespace dvi
         encodeTMDS_RGB444(dstTMDS->data(),
                           srcLine.buffer->data(), srcLine.buffer->size());
 
-        validTMDSQueue_.enque({srcLine.line, dstTMDS});
+        validTMDSQueue_.enque({srcLine.line * N_LINE_PER_DATA, N_LINE_PER_DATA, dstTMDS});
         freeLineQueue_.enque(std::move(srcLine.buffer));
     }
 
@@ -482,7 +488,33 @@ namespace dvi
     {
         auto dstTMDS = freeTMDSQueue_.deque();
         encodeTMDS_RGB444(dstTMDS->data(), buffer, size);
-        validTMDSQueue_.enque({line, dstTMDS});
+        validTMDSQueue_.enque({line * N_LINE_PER_DATA, N_LINE_PER_DATA, dstTMDS});
+    }
+
+    void
+    DVI::convertScanBuffer12bppRows(int first, int count, const uint16_t *src, int width)
+    {
+        const uint32_t t0 = time_us_32();
+        auto dstTMDS = freeTMDSQueue_.deque();
+        rowsWaitUs_ += time_us_32() - t0;
+
+        // A word of TMDS symbols per source pixel. The buffers also carry
+        // 320-pixel lines, so the borders are written every time.
+        const int chStride = timing_->hActivePixels / N_CHAR_PER_WORD;
+        const int border = (chStride - width) / 2;
+        assert((width & 3) == 0 && border >= 0);
+        auto *p = dstTMDS->data();
+        for (int ch = 0; ch < static_cast<int>(N_COLOR_CH); ++ch, p += chStride)
+        {
+            for (int i = 0; i < border; ++i)
+            {
+                p[i] = 0x7fd00u; // 0, 0
+                p[chStride - 1 - i] = 0x7fd00u;
+            }
+            encodeTMDSChannel16bpp(p + border, reinterpret_cast<const uint32_t *>(src), width, ch * 4, 4);
+        }
+
+        validTMDSQueue_.enque({first, count, dstTMDS});
     }
 
     void
@@ -500,7 +532,7 @@ namespace dvi
                                      dstPixels,
                                      srcLine.buffer->size());
 
-        validTMDSQueue_.enque({srcLine.line, dstTMDS});
+        validTMDSQueue_.enque({srcLine.line * N_LINE_PER_DATA, N_LINE_PER_DATA, dstTMDS});
         freeLineQueue_.enque(std::move(srcLine.buffer));
     }
 
@@ -518,7 +550,7 @@ namespace dvi
                                      dstPixels,
                                      size);
 
-        validTMDSQueue_.enque({line, dstTMDS});
+        validTMDSQueue_.enque({line * N_LINE_PER_DATA, N_LINE_PER_DATA, dstTMDS});
     }
 
 
