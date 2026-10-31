@@ -40,10 +40,18 @@ namespace dvi
         void __not_in_flash_func(convertScanBuffer12bpp)(uint16_t line, uint16_t *buffer, size_t size);
         void __not_in_flash_func(convertScanBuffer12bppScaled16_7)(int srcPixelOfs, int dstPixelOfs, int dstPixels);
         void __not_in_flash_func(convertScanBuffer12bppScaled16_7)(int srcPixelOfs, int dstPixelOfs, int dstPixels, uint16_t line, uint16_t *buffer, size_t size);
+        // One row of `width` pixels (a multiple of 4), pixel doubled and centred
+        // between black borders, shown on the `count` output lines from `first`.
+        void __not_in_flash_func(convertScanBuffer12bppRows)(int first, int count, const uint16_t *src, int width);
         uint32_t getFrameCounter() const
         {
             return frameCounter_;
         }
+        // Running totals, for statistics: active lines shown without a TMDS
+        // buffer (the red error lines), and the time convertScanBuffer12bppRows()
+        // waited for a free one.
+        uint32_t getMissedLines() const { return missedLines_; }
+        uint32_t getRowsWaitUs() const { return rowsWaitUs_; }
 
         BlankSettings &getBlankSettings() { return blankSettings_; }
         void setScanLine(bool f) { enableScanLine_ = f; }
@@ -92,8 +100,17 @@ namespace dvi
         };
 
         using TMDSBuffer = std::vector<uint32_t>;
-        using ResultTMDSBuffer = ResultBuffer<TMDSBuffer *>;
         using ResultLineBuffer = ResultBuffer<LineBuffer *>;
+
+        // A TMDS buffer is shown on `count` output lines from `first`: a source
+        // line on two (N_LINE_PER_DATA), a row of convertScanBuffer12bppRows()
+        // on as many as it covers.
+        struct ResultTMDSBuffer
+        {
+            int first{};
+            int count{};
+            TMDSBuffer *buffer{};
+        };
 
         // Depth of the line-buffer pool, i.e. how many scanlines the producer
         // may run ahead of scanout.
@@ -103,7 +120,7 @@ namespace dvi
         // 2 * (1/31500) = 63.5us at 640x480p60. A producer needing more than
         // that per line falls behind by the difference on every line and
         // starves once its lead is spent -- and dmaIRQHandler() only accepts a
-        // buffer on an exact `line * 2 == lineCounter_` match, so one miss
+        // buffer on an exact `first == lineCounter_` match, so one miss
         // orphans the rest of the frame (red lines) and costs a whole display
         // frame. Five buffers is only ~318us of lead: fine for a producer that
         // is faster per line than scanout, useless for one that is marginally
@@ -130,7 +147,10 @@ namespace dvi
         util::Queue<ResultTMDSBuffer> validTMDSQueue_{N_BUFFERS};
         util::Queue<TMDSBuffer *> freeTMDSQueue_{N_BUFFERS};
         TMDSBuffer *curTMDSBuffer_{};
+        int curLast_ = 0; // the last output line of curTMDSBuffer_
         TMDSBuffer *releaseTMDSBuffer_[2]{};
+        uint32_t missedLines_ = 0;
+        uint32_t rowsWaitUs_ = 0;
 
         util::Queue<ResultLineBuffer> validLineQueue_{N_LINE_BUFFERS};
         util::Queue<LineBuffer *> freeLineQueue_{N_LINE_BUFFERS};
